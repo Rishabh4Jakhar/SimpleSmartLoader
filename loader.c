@@ -1,212 +1,189 @@
 #include "loader.h"
 
-char *exec_path;
-
-Elf32_Ehdr *ehdr;
-Elf32_Phdr *phdr;
-int fd;
-
-int page_fault = 0;
-int page_allocations = 0;
-ll_i fragmentation = 0;
-
-int entry;
-int num_load_phdr = 0;
-
+// Global variables
+char *program_path;
+Elf32_Ehdr *elf_header;
+Elf32_Phdr *program_header;
+int file_descriptor;
+int fault_count = 0;
+int allocated_pages = 0;
+ll_i memory_fragmentation = 0;
+int entry_address;
+int load_segment_count = 0;
 Segment *segments;
 
-/*
- * release memory and other cleanups
- */
-void loader_cleanup() {
-  // freeing the memory for globally defined variables
-  ehdr = NULL;
-  free(ehdr);
-  phdr = NULL;
-  free(phdr);
-  free(segments);
-  exec_path = NULL;
-  free(exec_path);
+// Release all allocated resources
+void cleanup_loader() {
+    elf_header = NULL;
+    free(elf_header);
+    program_header = NULL;
+    free(program_header);
+    free(segments);
+    program_path = NULL;
+    free(program_path);
 }
 
-// Reading the elf file to store the data in the page
-void load_page_data(Segment *segment, char *exec_path, char *page, uintptr_t addr) {
-    int num_page = (addr - segment->vaddr) / PAGE_SIZE;
-    int exec_fd = open(exec_path, O_RDONLY);
-    lseek(exec_fd, segment->offset + num_page * PAGE_SIZE, SEEK_SET);
-    char *temp = (char *)malloc(PAGE_SIZE * sizeof(char));
-    if (temp == NULL) {
-        perror("Error: Can't allocate memory\n");
+// Load data into a page from the ELF file
+void populate_page(Segment *segment, char *program_path, char *page_buffer, uintptr_t address) {
+    int page_index = (address - segment->vaddr) / PAGE_SIZE;
+    int file = open(program_path, O_RDONLY);
+    lseek(file, segment->offset + page_index * PAGE_SIZE, SEEK_SET);
+    char *temp_buffer = (char *)malloc(PAGE_SIZE * sizeof(char));
+    if (temp_buffer == NULL) {
+        perror("Memory allocation failed\n");
         exit(EXIT_FAILURE);
     }
-    int rd = read(exec_fd, temp, MIN(PAGE_SIZE, MAX(0, segment->file_size - num_page * PAGE_SIZE)));
-    memcpy(page, temp, rd);
-    close(exec_fd);
-    free(temp);
+    int bytes_read = read(file, temp_buffer, MIN(PAGE_SIZE, MAX(0, segment->file_size - page_index * PAGE_SIZE)));
+    memcpy(page_buffer, temp_buffer, bytes_read);
+    close(file);
+    free(temp_buffer);
 }
 
-// Segmentation fault handler
-void segv_handler(int signum, siginfo_t *info, void *context) {
-    // if permission to access is denied, then the original action of SIGSEGV signal is invoked
+// Custom handler for segmentation faults
+void handle_segmentation_fault(int signal, siginfo_t *info, void *context) {
     if (info->si_code == SEGV_ACCERR) {
-        printf("Permission Denied Error: ");
-        old_state.sa_sigaction(signum, info, context);
+        printf("Access Denied Error: ");
+        old_state.sa_sigaction(signal, info, context);
     }
-    void *fault_addr = info->si_addr;
-    Segment *segment;
-    int found = 0;
-    // iterating through the loaded segments to check the bounds for required address
-    for (int i = 0; i < num_load_phdr; i++) {
-        if (fault_addr >= (void *)segments[i].vaddr && fault_addr <= (void *)(segments[i].vaddr + segments[i].mem_size)) {
-            segment = &segments[i];
-            found = 1;
+    void *fault_address = info->si_addr;
+    Segment *target_segment;
+    int segment_found = 0;
+
+    for (int i = 0; i < load_segment_count; i++) {
+        if (fault_address >= (void *)segments[i].vaddr && fault_address <= (void *)(segments[i].vaddr + segments[i].mem_size)) {
+            target_segment = &segments[i];
+            segment_found = 1;
             break;
         }
     }
-    // address not found, restores the default action for SIGSEGV signal
-    if (found == 0) {
-        printf("Memory out of bounds: ");
-        old_state.sa_sigaction(signum, info, context);
+    if (!segment_found) {
+        printf("Address Out of Bounds: ");
+        old_state.sa_sigaction(signal, info, context);
     }
-    // Calculating the offset of the fault address
-    int offset = (uintptr_t)info->si_addr - segment->vaddr;
-    // Page containing the fault address in the segment
-    int current_page = offset / PAGE_SIZE;
-    int pg = segment->data[current_page];
-    // pg = 1 which means the page is found
-    // signifies SIGSEGV signal is raised due to segmentation fault in the page code, not page fault
-    if (pg != 0) {
-        printf("Fault in submitted code: ");
-        old_state.sa_sigaction(signum, info, context);
+
+    int offset_within_segment = (uintptr_t)info->si_addr - target_segment->vaddr;
+    int page_num = offset_within_segment / PAGE_SIZE;
+    int page_present = target_segment->data[page_num];
+    
+    if (page_present != 0) {
+        printf("Code Error: ");
+        old_state.sa_sigaction(signal, info, context);
     }
-    page_fault++;
-    // Mapping the page to access it
-    void *page = mmap((void *)segment->vaddr + current_page * PAGE_SIZE, PAGE_SIZE, PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-    if (page == MAP_FAILED) {
-        perror("Error in mapping\n");
+
+    fault_count++;
+    void *new_page = mmap((void *)target_segment->vaddr + page_num * PAGE_SIZE, PAGE_SIZE, PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+    if (new_page == MAP_FAILED) {
+        perror("Error in mmap\n");
         exit(EXIT_FAILURE);
     }
-    page_allocations++;
-    // Reading the elf file again to store data in the mapped address
-    load_page_data(segment, exec_path, page, (uintptr_t)info->si_addr);
-    // setting the read, write, execute permissions of the page according to the permissions of the respective segment
-    mprotect(page, PAGE_SIZE, segment->perm);
-    // Page added in the array
-    segment->data[current_page] = 1;
+    allocated_pages++;
+    populate_page(target_segment, program_path, new_page, (uintptr_t)info->si_addr);
+    mprotect(new_page, PAGE_SIZE, target_segment->perm);
+    target_segment->data[page_num] = 1;
 }
 
-// Running the elf file and loading the segments to the heap
-void load_and_run_elf(char **exe) {
-    fd = open(*exe, O_RDONLY);
-    if (fd == -1) {
-        perror("Can't open file\n");
+// Initialize ELF loading and run program
+void initialize_and_run_elf(char **exec_path) {
+    file_descriptor = open(*exec_path, O_RDONLY);
+    if (file_descriptor == -1) {
+        perror("File could not be opened\n");
         exit(EXIT_FAILURE);
     }
 
-    off_t fd_size = lseek(fd, 0, SEEK_END);
-    lseek(fd, 0, SEEK_SET);
+    off_t file_size = lseek(file_descriptor, 0, SEEK_END);
+    lseek(file_descriptor, 0, SEEK_SET);
+    char *heap_memory = (char *)malloc(file_size);
 
-    char *heap_mem;
-    heap_mem = (char *)malloc(fd_size);
-
-    // verifying if memory is allocated
-    if (!heap_mem) {
-        perror("Error: Memory allocation failed");
+    if (!heap_memory) {
+        perror("Error: Could not allocate memory");
         exit(1);
     }
 
-    ssize_t file_read = read(fd, heap_mem, fd_size);
-
-    // verifying if file is read successfully
-    if (file_read < 0 || (size_t)file_read != fd_size) {
-        perror("Error: File read operation failed");
-        free(heap_mem);
+    ssize_t bytes_loaded = read(file_descriptor, heap_memory, file_size);
+    if (bytes_loaded < 0 || (size_t)bytes_loaded != file_size) {
+        perror("File read failed");
+        free(heap_memory);
         exit(1);
     }
-    ehdr = (Elf32_Ehdr *)heap_mem;
-    phdr = (Elf32_Phdr *)(heap_mem + ehdr->e_phoff);
-    Elf32_Phdr *tmp = phdr;
-    int total_phdr = ehdr->e_phnum;
+
+    elf_header = (Elf32_Ehdr *)heap_memory;
+    program_header = (Elf32_Phdr *)(heap_memory + elf_header->e_phoff);
+    Elf32_Phdr *current_header = program_header;
+    int total_segments = elf_header->e_phnum;
     int i = 0;
-    while (i < total_phdr) {
-        if (tmp->p_type == PT_LOAD) {
-            num_load_phdr++;
+
+    while (i < total_segments) {
+        if (current_header->p_type == PT_LOAD) {
+            load_segment_count++;
         }
         i++;
-        tmp++;
+        current_header++;
     }
-    entry = ehdr->e_entry;
-    // array storing PT_LOAD segments, which contain sections of the code
-    segments = (Segment *)malloc(num_load_phdr * sizeof(Segment));
+
+    entry_address = elf_header->e_entry;
+    segments = (Segment *)malloc(load_segment_count * sizeof(Segment));
     int j = 0;
-    for (int i = 0; i < total_phdr; i++) {
-        if (phdr[i].p_type == PT_LOAD) {
+
+    for (int i = 0; i < total_segments; i++) {
+        if (program_header[i].p_type == PT_LOAD) {
             Segment *seg = &segments[j];
             seg->perm = 0;
-            // Setting read, write and execute permissions for the loaded segment
-            if (phdr[i].p_flags & PF_X) {
-                seg->perm |= 4;
-            }
-            if (phdr[i].p_flags & PF_R) {
-                seg->perm |= 1;
-            }
-            if (phdr[i].p_flags & PF_W) {
-                seg->perm |= 2;
-            }
-            // Aligning the virtual addresses to the closest multiple of the PAGE_SIZE rounded up
-            seg->vaddr = ROUND_UP(phdr[i].p_vaddr, PAGE_SIZE);
-            // Setting the other parameters of the segment wrt to the program header
-            seg->offset = phdr[i].p_offset - (phdr[i].p_vaddr - seg->vaddr);
-            seg->mem_size = phdr[i].p_memsz + (phdr[i].p_vaddr - seg->vaddr);
-            seg->file_size = phdr[i].p_filesz + (phdr[i].p_vaddr - seg->vaddr);
-            // Initialising the page data array to 0
+
+            if (program_header[i].p_flags & PF_X) seg->perm |= 4;
+            if (program_header[i].p_flags & PF_R) seg->perm |= 1;
+            if (program_header[i].p_flags & PF_W) seg->perm |= 2;
+
+            seg->vaddr = ROUND_UP(program_header[i].p_vaddr, PAGE_SIZE);
+            seg->offset = program_header[i].p_offset - (program_header[i].p_vaddr - seg->vaddr);
+            seg->mem_size = program_header[i].p_memsz + (program_header[i].p_vaddr - seg->vaddr);
+            seg->file_size = program_header[i].p_filesz + (program_header[i].p_vaddr - seg->vaddr);
             memset(seg[i].data, 0, MAX_PAGES * sizeof(int));
-            // Calculating the fragmentation of each loaded segment
+
             int allocated_memory = ROUND_UP(seg->mem_size, PAGE_SIZE);
             ll_i fragment = allocated_memory - seg->mem_size;
-            fragmentation += fragment;
+            memory_fragmentation += fragment;
             j++;
         }
     }
-    // directly running the code
-    int (*_start)(void) = (int (*)(void))entry;
-    int result = _start();
-    printf("User _start return value = %d\n", result);
-    printf("Page faults: %d\n", page_fault);
-    printf("Page Allocations: %d\n", page_fault);
-    printf("Total internal fragmentations: %f KB\n", (double)fragmentation / 1024);
+
+    int (*program_start)(void) = (int (*)(void))entry_address;
+    int result = program_start();
+    printf("Program returned: %d\n", result);
+    printf("Page faults: %d\n", fault_count);
+    printf("Page allocations: %d\n", allocated_pages);
+    printf("Total memory fragmentation: %f KB\n", (double)memory_fragmentation / 1024);
 }
 
-// Initialising the SIGSEGV signal to set the handler as segv_handler
-void initialise_signal() {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = segv_handler;
-    sa.sa_flags = SA_SIGINFO;
-    if (sigaction(SIGSEGV, &sa, &old_state) == -1)
-    {
-        perror("Error in sigaction");
+// Set up the SIGSEGV handler
+void configure_signal_handler() {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = handle_segmentation_fault;
+    action.sa_flags = SA_SIGINFO;
+
+    if (sigaction(SIGSEGV, &action, &old_state) == -1) {
+        perror("Error setting up signal handler");
         exit(EXIT_FAILURE);
     }
 }
 
-// main function
+// Main function
 int main(int argc, char **argv) {
-    // check for command-line arguments
-    if (argc != 2)
-    {
-        printf("Usage: %s <ELF Executable> \n", argv[0]);
+    if (argc != 2) {
+        printf("Usage: %s <ELF Executable>\n", argv[0]);
         exit(1);
     }
-    exec_path = argv[1];
-    FILE *elfFile = fopen(argv[1], "rb");
-    if (!elfFile) {
-        printf("Error: Unable to open ELF file.\n");
+
+    program_path = argv[1];
+    FILE *elf_file = fopen(argv[1], "rb");
+    if (!elf_file) {
+        printf("Error: Could not open ELF file.\n");
         exit(1);
     }
-    fclose(elfFile);
-    initialise_signal();
-    load_and_run_elf(&argv[1]);
-    loader_cleanup();
+    fclose(elf_file);
+
+    configure_signal_handler();
+    initialize_and_run_elf(&argv[1]);
+    cleanup_loader();
     return 0;
 }
