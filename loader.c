@@ -148,7 +148,7 @@ void initialize_and_run_elf(char **exec_path) {
 
     int (*program_start)(void) = (int (*)(void))entry_address;
     int result = program_start();
-    printf("Program returned: %d\n", result);
+    printf("User _start return value: %d\n", result);
     printf("Page faults: %d\n", fault_count);
     printf("Page allocations: %d\n", allocated_pages);
     printf("Total memory fragmentation: %f KB\n", (double)memory_fragmentation / 1024);
