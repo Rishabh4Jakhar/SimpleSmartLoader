@@ -16,7 +16,7 @@
 #define MIN(a, b) (a < b ? a : b)
 #define ROUND_UP(a, b) (((a + (b - 1)) & -b))
 
-#define lli long long int
+#define ll_i long long int
 
 struct sigaction old_state;
 
