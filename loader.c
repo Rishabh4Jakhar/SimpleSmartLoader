@@ -18,8 +18,7 @@ Segment *segments;
 /*
  * release memory and other cleanups
  */
-void loader_cleanup()
-{
+void loader_cleanup() {
   // freeing the memory for globally defined variables
   ehdr = NULL;
   free(ehdr);
@@ -31,15 +30,13 @@ void loader_cleanup()
 }
 
 // Reading the elf file to store the data in the page
-void load_page_data(Segment *segment, char *exec_path, char *page, uintptr_t addr)
-{
+void load_page_data(Segment *segment, char *exec_path, char *page, uintptr_t addr) {
     int num_page = (addr - segment->vaddr) / PAGE_SIZE;
     int exec_fd = open(exec_path, O_RDONLY);
     lseek(exec_fd, segment->offset + num_page * PAGE_SIZE, SEEK_SET);
     char *temp = (char *)malloc(PAGE_SIZE * sizeof(char));
-    if (temp == NULL)
-    {
-        perror("Can't allocate memory\n");
+    if (temp == NULL) {
+        perror("Error: Can't allocate memory\n");
         exit(EXIT_FAILURE);
     }
     int rd = read(exec_fd, temp, MIN(PAGE_SIZE, MAX(0, segment->file_size - num_page * PAGE_SIZE)));
@@ -49,30 +46,25 @@ void load_page_data(Segment *segment, char *exec_path, char *page, uintptr_t add
 }
 
 // Segmentation fault handler
-void segv_handler(int signum, siginfo_t *info, void *context)
-{
+void segv_handler(int signum, siginfo_t *info, void *context) {
     // if permission to access is denied, then the original action of SIGSEGV signal is invoked
-    if (info->si_code == SEGV_ACCERR)
-    {
-        printf("Permission Denied: ");
+    if (info->si_code == SEGV_ACCERR) {
+        printf("Permission Denied Error: ");
         old_state.sa_sigaction(signum, info, context);
     }
     void *fault_addr = info->si_addr;
     Segment *segment;
     int found = 0;
     // iterating through the loaded segments to check the bounds for required address
-    for (int i = 0; i < num_load_phdr; i++)
-    {
-        if (fault_addr >= (void *)segments[i].vaddr && fault_addr <= (void *)(segments[i].vaddr + segments[i].mem_size))
-        {
+    for (int i = 0; i < num_load_phdr; i++) {
+        if (fault_addr >= (void *)segments[i].vaddr && fault_addr <= (void *)(segments[i].vaddr + segments[i].mem_size)) {
             segment = &segments[i];
             found = 1;
             break;
         }
     }
     // address not found, restores the default action for SIGSEGV signal
-    if (found == 0)
-    {
+    if (found == 0) {
         printf("Memory out of bounds: ");
         old_state.sa_sigaction(signum, info, context);
     }
@@ -83,16 +75,14 @@ void segv_handler(int signum, siginfo_t *info, void *context)
     int pg = segment->data[current_page];
     // pg = 1 which means the page is found
     // signifies SIGSEGV signal is raised due to segmentation fault in the page code, not page fault
-    if (pg != 0)
-    {
+    if (pg != 0) {
         printf("Fault in submitted code: ");
         old_state.sa_sigaction(signum, info, context);
     }
     page_fault++;
     // Mapping the page to access it
     void *page = mmap((void *)segment->vaddr + current_page * PAGE_SIZE, PAGE_SIZE, PROT_WRITE, MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-    if (page == MAP_FAILED)
-    {
+    if (page == MAP_FAILED) {
         perror("Error in mapping\n");
         exit(EXIT_FAILURE);
     }
@@ -106,11 +96,9 @@ void segv_handler(int signum, siginfo_t *info, void *context)
 }
 
 // Running the elf file and loading the segments to the heap
-void load_and_run_elf(char **exe)
-{
+void load_and_run_elf(char **exe) {
     fd = open(*exe, O_RDONLY);
-    if (fd == -1)
-    {
+    if (fd == -1) {
         perror("Can't open file\n");
         exit(EXIT_FAILURE);
     }
@@ -122,8 +110,7 @@ void load_and_run_elf(char **exe)
     heap_mem = (char *)malloc(fd_size);
 
     // verifying if memory is allocated
-    if (!heap_mem)
-    {
+    if (!heap_mem) {
         perror("Error: Memory allocation failed");
         exit(1);
     }
@@ -131,8 +118,7 @@ void load_and_run_elf(char **exe)
     ssize_t file_read = read(fd, heap_mem, fd_size);
 
     // verifying if file is read successfully
-    if (file_read < 0 || (size_t)file_read != fd_size)
-    {
+    if (file_read < 0 || (size_t)file_read != fd_size) {
         perror("Error: File read operation failed");
         free(heap_mem);
         exit(1);
@@ -142,10 +128,8 @@ void load_and_run_elf(char **exe)
     Elf32_Phdr *tmp = phdr;
     int total_phdr = ehdr->e_phnum;
     int i = 0;
-    while (i < total_phdr)
-    {
-        if (tmp->p_type == PT_LOAD)
-        {
+    while (i < total_phdr) {
+        if (tmp->p_type == PT_LOAD) {
             num_load_phdr++;
         }
         i++;
@@ -155,23 +139,18 @@ void load_and_run_elf(char **exe)
     // array storing PT_LOAD segments, which contain sections of the code
     segments = (Segment *)malloc(num_load_phdr * sizeof(Segment));
     int j = 0;
-    for (int i = 0; i < total_phdr; i++)
-    {
-        if (phdr[i].p_type == PT_LOAD)
-        {
+    for (int i = 0; i < total_phdr; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
             Segment *seg = &segments[j];
             seg->perm = 0;
             // Setting read, write and execute permissions for the loaded segment
-            if (phdr[i].p_flags & PF_X)
-            {
+            if (phdr[i].p_flags & PF_X) {
                 seg->perm |= 4;
             }
-            if (phdr[i].p_flags & PF_R)
-            {
+            if (phdr[i].p_flags & PF_R) {
                 seg->perm |= 1;
             }
-            if (phdr[i].p_flags & PF_W)
-            {
+            if (phdr[i].p_flags & PF_W) {
                 seg->perm |= 2;
             }
             // Aligning the virtual addresses to the closest multiple of the PAGE_SIZE rounded up
@@ -199,22 +178,20 @@ void load_and_run_elf(char **exe)
 }
 
 // Initialising the SIGSEGV signal to set the handler as segv_handler
-void initialise_signal()
-{
+void initialise_signal() {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = segv_handler;
     sa.sa_flags = SA_SIGINFO;
     if (sigaction(SIGSEGV, &sa, &old_state) == -1)
     {
-        perror("sigaction");
+        perror("Error in sigaction");
         exit(EXIT_FAILURE);
     }
 }
 
 // main function
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     // check for command-line arguments
     if (argc != 2)
     {
@@ -223,8 +200,7 @@ int main(int argc, char **argv)
     }
     exec_path = argv[1];
     FILE *elfFile = fopen(argv[1], "rb");
-    if (!elfFile)
-    {
+    if (!elfFile) {
         printf("Error: Unable to open ELF file.\n");
         exit(1);
     }
