@@ -8,7 +8,7 @@ int fd;
 
 int page_fault = 0;
 int page_allocations = 0;
-lli fragmentation = 0;
+ll_i fragmentation = 0;
 
 int entry;
 int num_load_phdr = 0;
@@ -163,7 +163,7 @@ void load_and_run_elf(char **exe) {
             memset(seg[i].data, 0, MAX_PAGES * sizeof(int));
             // Calculating the fragmentation of each loaded segment
             int allocated_memory = ROUND_UP(seg->mem_size, PAGE_SIZE);
-            lli fragment = allocated_memory - seg->mem_size;
+            ll_i fragment = allocated_memory - seg->mem_size;
             fragmentation += fragment;
             j++;
         }
